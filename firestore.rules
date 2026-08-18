@@ -1,0 +1,199 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    
+    // ==================== HELPER FUNCTIONS ====================
+    
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+    
+    function isAdmin() {
+      return isAuthenticated() && get(/databases/$(database)/documents/users/$(request.auth.uid)).data.isAdmin == true;
+    }
+    
+    function isOwner(userId) {
+      return isAuthenticated() && request.auth.uid == userId;
+    }
+    
+    function userExists(userId) {
+      return exists(/databases/$(database)/documents/users/$(userId));
+    }
+    
+    // ==================== USERS COLLECTION ====================
+    
+    match /users/{userId} {
+      // Read: User can read their own profile + admins can read all
+      allow read: if isOwner(userId) || isAdmin();
+      
+      // Create: New user registration
+      allow create: if isAuthenticated() && 
+                       request.auth.uid == userId &&
+                       request.resource.data.keys().hasAll(['email', 'displayName']) &&
+                       !exists(/databases/$(database)/documents/users/$(userId));
+      
+      // Update: User can update their own profile
+      allow update: if isOwner(userId) &&
+                       !('isAdmin' in request.resource.data.diff(resource.data).affectedKeys()) &&
+                       !('accountStatus' in request.resource.data.diff(resource.data).affectedKeys());
+      
+      // Delete: Only admins can delete users
+      allow delete: if isAdmin();
+      
+      // ========== NESTED: User Wallet Transactions ==========
+      match /transactions/{transactionId} {
+        allow read: if isOwner(userId);
+        allow create: if isOwner(userId);
+        allow update, delete: if isAdmin();
+      }
+    }
+    
+    // ==================== TOURNAMENTS COLLECTION ====================
+    
+    match /tournaments/{tournamentId} {
+      // Read: Everyone can read tournaments
+      allow read: if true;
+      
+      // Create: Only admins can create tournaments
+      allow create: if isAdmin() &&
+                       request.resource.data.keys().hasAll(['name', 'gameType', 'entryFee', 'prizePool']);
+      
+      // Update: Only admins can update tournament details (except registeredPlayers)
+      allow update: if isAdmin() &&
+                       !('registeredPlayersList' in request.resource.data.diff(resource.data).affectedKeys());
+      
+      // Delete: Only admins can delete tournaments
+      allow delete: if isAdmin();
+      
+      // ========== NESTED: Tournament Registrations ==========
+      match /registrations/{userId} {
+        // User can read their own registration
+        allow read: if isOwner(userId) || isAdmin();
+        
+        // User can register for tournament
+        allow create: if isOwner(userId) &&
+                         request.resource.data.keys().hasAll(['userId', 'tournamentId', 'status']);
+        
+        // User can update their own registration
+        allow update: if isOwner(userId) && 
+                         !('entryFeeDeducted' in request.resource.data.diff(resource.data).affectedKeys());
+        
+        // Admin can update result status
+        allow update: if isAdmin() && 
+                         'resultStatus' in request.resource.data.diff(resource.data).affectedKeys();
+        
+        allow delete: if isAdmin();
+      }
+    }
+    
+    // ==================== WALLETS COLLECTION ====================
+    
+    match /wallets/{userId} {
+      // Read: User can read their wallet, admins can read all
+      allow read: if isOwner(userId) || isAdmin();
+      
+      // Create: System creates wallet on user registration (via backend)
+      allow create: if false; // Handle via backend Cloud Functions
+      
+      // Update: Only backend functions can update wallet (via server write)
+      allow update: if false;
+      
+      // Delete: Never allow delete
+      allow delete: if false;
+      
+      // ========== NESTED: Wallet Transactions ==========
+      match /transactions/{transactionId} {
+        allow read: if isOwner(userId) || isAdmin();
+        allow create: if false; // Handle via backend
+        allow update: if isAdmin(); // Admin approval/rejection
+        allow delete: if false;
+      }
+    }
+    
+    // ==================== WITHDRAWAL REQUESTS COLLECTION ====================
+    
+    match /withdrawalRequests/{requestId} {
+      // User can read their own requests
+      allow read: if isOwner(resource.data.userId) || isAdmin();
+      
+      // User can create withdrawal request
+      allow create: if isAuthenticated() &&
+                       request.auth.uid == request.resource.data.userId &&
+                       request.resource.data.keys().hasAll(['userId', 'amount', 'status']);
+      
+      // User cannot update their own request (admin only)
+      allow update: if isAdmin() &&
+                       'status' in request.resource.data.diff(resource.data).affectedKeys();
+      
+      // Only admins can delete
+      allow delete: if isAdmin();
+    }
+    
+    // ==================== DISPUTES COLLECTION ====================
+    
+    match /disputes/{disputeId} {
+      // User can read their own disputes, admins can read all
+      allow read: if isOwner(resource.data.userId) || isAdmin();
+      
+      // User can create dispute
+      allow create: if isAuthenticated() &&
+                       request.auth.uid == request.resource.data.userId &&
+                       request.resource.data.keys().hasAll(['tournamentId', 'userId', 'type']);
+      
+      // Admin can update dispute status and resolution
+      allow update: if isAdmin() &&
+                       ('status' in request.resource.data.diff(resource.data).affectedKeys() ||
+                        'resolution' in request.resource.data.diff(resource.data).affectedKeys());
+      
+      // Only admins can delete
+      allow delete: if isAdmin();
+    }
+    
+    // ==================== NOTIFICATIONS COLLECTION ====================
+    
+    match /notifications/{userId}/messages/{notificationId} {
+      // User can read their own notifications
+      allow read: if isOwner(userId);
+      
+      // Only backend can create notifications
+      allow create: if false;
+      
+      // User can update read status
+      allow update: if isOwner(userId) &&
+                       'isRead' in request.resource.data.diff(resource.data).affectedKeys();
+      
+      // Only backend can delete
+      allow delete: if false;
+    }
+    
+    // ==================== DEVICE TRACKING COLLECTION ====================
+    
+    match /deviceTracking/{deviceId} {
+      // User can read if their ID is in the document
+      allow read: if isAuthenticated() &&
+                     request.auth.uid in resource.data.userIds;
+      
+      // Only backend can create/update (via Cloud Functions)
+      allow create, update, delete: if false;
+    }
+    
+    // ==================== ADMIN AUDIT LOG COLLECTION ====================
+    
+    match /adminAuditLogs/{logId} {
+      // Only admins can read audit logs
+      allow read: if isAdmin();
+      
+      // Only backend can create logs
+      allow create: if false;
+      
+      // Immutable - no updates or deletes
+      allow update, delete: if false;
+    }
+    
+    // ==================== CATCH-ALL (DENY ALL) ====================
+    
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}
